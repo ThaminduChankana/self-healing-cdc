@@ -8,11 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+ARG EXTRA_REQUIREMENTS=""
+COPY requirements*.txt ./
+RUN pip install -r requirements.txt && if [ -n "$EXTRA_REQUIREMENTS" ]; then pip install -r "$EXTRA_REQUIREMENTS"; fi
 
 # Non-root user (also makes RLIMIT_NPROC effective inside the sandbox child).
-RUN useradd --create-home --uid 10001 app && mkdir -p /app/state && chown app:app /app/state
+RUN useradd --create-home --uid 10001 app && mkdir -p /app/state /app/lake && chown app:app /app/state /app/lake
 COPY --chown=app:app src ./src
 COPY --chown=app:app config ./config
 USER app

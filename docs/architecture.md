@@ -132,10 +132,35 @@ DLQ message ─► idempotency check (SQLite) ─► reason == SCHEMA_DRIFT? ─
     annotations, apply the re-rendered statements, diff `information_schema` (nothing removed or
     narrowed, new columns nullable or defaulted), insert the repaired row, then drop the scratch database.
 
-### Downstream
+### Downstream destinations
 
-`src/downstream/consumer.py` consumes `cdc.validated` and `cdc.repaired`, de-duplicates on `event_id`,
-and upserts or deletes by primary key in a SQLite warehouse stand-in.
+`src/downstream/consumer.py` runs one `DestinationRunner` thread per enabled entry in
+`config/destinations.yaml`.
+
+- **Normalise.** Both clean topics become one `ChangeRecord` (`src/sinks/base.py`): table reference
+  `<source>.<database>.<table>`, key, op, canonical payload, `event_id`, `repair_id`, origin
+  (validated/repaired) and a monotonic **source sequence** derived from the binlog file/pos/row.
+- **Route.** Each destination's `tables:` globs decide which tables it receives.
+- **Deliver.** Micro-batches go to `Sink.write()`. Offsets are committed per destination only after the
+  sink succeeded. On failure the runner seeks back to the first offset of the batch and retries with
+  backoff. A per-destination SQLite ledger skips `event_id`s it has already delivered, so retries and
+  restarts are idempotent.
+- **Isolation.** Each destination has its own consumer group (`cdc-downstream-<name>`), so a broken
+  destination lags alone and catches up later. A new destination backfills from the start of the topics.
+- **Ordering.** A repaired event is published seconds after the change happened, possibly after a newer
+  valid change to the same row. Sinks therefore apply last-writer-wins on `_seq`:
+  - SQLite guards its upsert on `_seq`.
+  - Iceberg upsert mode drops stale records.
+  - BigQuery's view and JSONL readers take max(`_seq`) per key.
+  - Deletes are tombstones, so a late upsert cannot resurrect a row.
+
+| Sink | Module | Notes |
+|---|---|---|
+| `sqlite` | `sinks/sqlite_sink.py` | current state, local stand-in for an operational warehouse |
+| `jsonl` | `sinks/jsonl_sink.py` | bronze/landing change log, Hive-style `dt=` partitions |
+| `iceberg` | `sinks/iceberg_sink.py` | pyiceberg; catalog is config (SQL locally; Glue/REST/BigLake/Hive in the cloud) |
+| `bigquery` | `sinks/bigquery_sink.py` | changelog table + latest-row view; Storage Write API CDC is the high-volume upgrade |
+| custom | `type: "pkg.module:Class"` | any `Sink` subclass |
 
 ## Cloud-portable interfaces
 
@@ -146,6 +171,7 @@ and upserts or deletes by primary key in a SQLite warehouse stand-in.
 | LLM | `LLMClient.generate_repair(RepairRequest) -> RepairResponse` | `OllamaLLMClient`, `MockLLMClient` | `BedrockLLMClient` (implement `_complete`, `is_available`, `model_available`) |
 | Database | `DatabaseConnector` (`common/database.py`) | mysql-connector | RDS / Aurora via IAM auth |
 | State store | `StateStore` (`common/state_store.py`) | SQLite | DynamoDB |
+| Destination | `Sink` (`sinks/base.py`) + `config/destinations.yaml` | SQLite, JSONL lake, Iceberg | BigQuery, Iceberg on S3/GCS (Glue/BigLake catalog), Snowflake/Redshift via custom sink |
 | Metrics | Prometheus client (`common/metrics.py`) | `/metrics` | CloudWatch agent / AMP scrape |
 
 ## Multiple sources

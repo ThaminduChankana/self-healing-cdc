@@ -64,10 +64,11 @@ def compact_dlq(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def warehouse_row(table_ref: str, pk: dict[str, Any]) -> dict[str, Any] | None:
+def destination_rows(table_ref: str, pk: dict[str, Any]) -> dict[str, Any] | None:
+    """What every configured destination holds for this key (read inside the downstream container)."""
     try:
-        out = subprocess.run(["docker", "exec", "cdc-downstream", "python", "-m", "src.downstream.consumer",
-                              "--show", table_ref, json.dumps(pk)], capture_output=True, text=True, timeout=30)
+        out = subprocess.run(["docker", "exec", "cdc-downstream", "python", "-m", "src.tools.destinations",
+                              "show", table_ref, json.dumps(pk)], capture_output=True, text=True, timeout=60)
         return json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else None
     except (subprocess.SubprocessError, ValueError):
         return None
@@ -199,15 +200,17 @@ def main() -> None:
         fail(f"second repair was {a2['repair_result']}: {a2.get('reasons')}")
     ok(f"repaired from {a2['repair_source']} in seconds (fingerprint match) → {a2['repair_result']}")
 
-    step("Downstream ingestion and lineage of the repaired event")
-    table_ref = f"{rp['source_name']}:{rp['source_database']}.{rp['source_table']}"
-    row = None
-    for _ in range(20):
-        row = warehouse_row(table_ref, rp["key"])
-        if row and row.get("event_id") == event_id or (row and row.get("source_topic") == s.repaired_topic):
+    step("Repaired row delivered to every configured destination (config/destinations.yaml)")
+    table_ref = f"{source.name}.{rp['source_database']}.{rp['source_table']}"
+    landed: dict[str, Any] | None = None
+    for _ in range(30):
+        landed = destination_rows(table_ref, rp["key"])
+        wh = (landed or {}).get("warehouse") or {}
+        if isinstance(wh, dict) and wh.get("event_id") == event_id:
             break
         time.sleep(1)
-    show(row or {"warning": "downstream row not found"})
+    show(landed or {"warning": "no destination data found"}, limit=4000)
+    row = (landed or {}).get("warehouse")
     print(f"{B}Lineage for {event_id}:{N}")
     print(f"  source change   : {d['source_name']}:{d['source_database']}.{table} binlog "
           f"{d['source_metadata'].get('file')}:{d['source_metadata'].get('pos')}")
@@ -216,7 +219,8 @@ def main() -> None:
     print(f"  repair          : repair_id={a['repair_id']} hash={a['transformation_hash']}")
     print(f"  cdc.repaired    : {rp['_kafka']['topic']}/{rp['_kafka']['partition']}/{rp['_kafka']['offset']}")
     print(f"  cdc.audit       : {a['_kafka']['topic']}/{a['_kafka']['partition']}/{a['_kafka']['offset']}")
-    print(f"  warehouse       : {'present' if row else 'missing'} ({table_ref} {rp['key']})")
+    for dest, val in (landed or {}).items():
+        print(f"  {dest:<16}: {'present' if val and not isinstance(val, str) else val}")
 
     if not args.keep_drift:
         step("Undo the demo drift (non-destructive rename back) and confirm normal flow resumes")

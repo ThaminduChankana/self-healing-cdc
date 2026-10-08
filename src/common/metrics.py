@@ -43,10 +43,16 @@ EVENTS_DEFERRED = Counter(
 )
 REPAIR_CACHE_HITS = Counter("cdc_repair_cache_hits_total", "Repairs served from the approved-repair cache")
 DOWNSTREAM_INGESTED = Counter(
-    "cdc_downstream_ingested_total", "Rows applied to the downstream store", ["source_topic", "op"]
+    "cdc_downstream_ingested_total", "Change records delivered to a destination", ["destination", "op"]
 )
 DOWNSTREAM_DUPLICATES = Counter(
-    "cdc_downstream_duplicates_total", "Duplicate events ignored downstream", ["source_topic"]
+    "cdc_downstream_duplicates_total", "Duplicate events skipped by a destination", ["destination"]
+)
+DOWNSTREAM_ERRORS = Counter(
+    "cdc_downstream_errors_total", "Failed delivery attempts (batch retried, never dropped)", ["destination"]
+)
+DOWNSTREAM_LAG = Gauge(
+    "cdc_downstream_last_delivery_timestamp", "Unix time of the last successful delivery", ["destination"]
 )
 CIRCUIT_OPEN = Gauge("cdc_circuit_open", "1 while a consumer circuit breaker is open", ["component"])
 HEARTBEAT = Gauge("cdc_consumer_heartbeat_timestamp", "Last poll loop iteration (unix time)", ["component"])

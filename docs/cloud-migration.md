@@ -40,7 +40,7 @@ Validation consumer  (ECS Fargate service / EKS Deployment, N replicas, same con
 | Python sandbox (subprocess + rlimits) | Lambda (no VPC/egress, read-only FS, 1–5 s timeout) or Firecracker/gVisor Fargate task | Stronger isolation than the MVP. |
 | SQL sandbox MySQL | Ephemeral Aurora clone / scratch schema on a non-production instance | IAM DB auth, account limited to `sbx_%`. |
 | SQLite state store | DynamoDB (`event_id` PK, conditional writes) | Conditional put gives exactly-once *decision* semantics across workers. |
-| SQLite warehouse | Redshift / S3 + Iceberg | Consume `cdc.validated` + `cdc.repaired`, MERGE on PK. |
+| SQLite warehouse / JSONL lake / local Iceberg | Iceberg on S3 (Glue catalog) / Redshift / BigQuery / Snowflake | Change `config/destinations.yaml` only: `iceberg` with `catalog: {type: glue, warehouse: s3://…}`, `bigquery` with a project, or a custom `Sink` class. Each destination keeps its own consumer group and retry. |
 | JSON stdout logs | CloudWatch Logs (awslogs / FireLens) | Fields `event_id`, `repair_id`, `correlation_id` → Logs Insights queries. |
 | Prometheus `/metrics` | CloudWatch agent (Prometheus scrape) or Amazon Managed Prometheus + Grafana | Metric names unchanged. |
 | `.env` | Secrets Manager + SSM Parameter Store | ECS task secrets / External Secrets on EKS. |

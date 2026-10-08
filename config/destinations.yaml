@@ -1,0 +1,69 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Destination registry — where clean data (cdc.validated + cdc.repaired) lands.
+#
+# The downstream service delivers to EVERY enabled destination, each with its
+# own Kafka consumer group, offsets, batching and retry, so a failing
+# destination never blocks or loses data for the others.
+#
+#   type:     sqlite | jsonl | iceberg | bigquery | "<python.module>:<ClassName>"
+#             (the last form loads your own Sink subclass — no code change here)
+#   enabled:  true/false (env-substitutable, e.g. "${BQ_ENABLED:-false}")
+#   tables:   glob patterns on "<source>.<database>.<table>" (default ["*"])
+#   batch_size / max_batch_wait_seconds: micro-batching per destination
+#   options:  type-specific settings; "${VAR}" / "${VAR:-default}" are expanded
+#             from the environment. Never put credentials here — reference env vars.
+#
+# Every record carries event_id, repair_id, op and a monotonic source
+# sequence (_seq, from the binlog position) so any destination can de-duplicate
+# and resolve out-of-order delivery (a repaired event can arrive after a newer
+# valid change for the same row).
+# ─────────────────────────────────────────────────────────────────────────────
+
+destinations:
+  # Current-state table per source table (stand-in for an operational warehouse).
+  warehouse:
+    type: sqlite
+    enabled: true
+    tables: ["*"]
+    options:
+      path: ${STATE_DIR}/warehouse.db
+
+  # Bronze / landing zone of a data lake: append-only change log as JSON lines,
+  # partitioned by source/database/table/date. Readable by Spark, DuckDB, Athena,
+  # BigQuery external tables, Snowflake external stages...
+  lake_landing:
+    type: jsonl
+    enabled: true
+    tables: ["*"]
+    options:
+      root: ${LAKE_DIR}/landing
+
+  # Apache Iceberg tables (open lakehouse format). Local SQL catalog + file
+  # warehouse here; switch the catalog to Glue / REST / BigLake / Nessie in the
+  # cloud by changing `catalog` only.
+  lakehouse:
+    type: iceberg
+    enabled: true
+    tables: ["*"]
+    batch_size: 200
+    options:
+      namespace: cdc
+      mode: upsert            # upsert = current state per primary key | changelog = append every change
+      catalog:
+        name: local
+        type: sql
+        uri: sqlite:///${LAKE_DIR}/iceberg/catalog.db
+        warehouse: file://${LAKE_DIR}/iceberg/warehouse
+
+  # Google BigQuery: changelog table + "latest row" view per source table.
+  # Requires `pip install google-cloud-bigquery` (see requirements-optional.txt)
+  # and Application Default Credentials / GOOGLE_APPLICATION_CREDENTIALS.
+  bigquery:
+    type: bigquery
+    enabled: ${BQ_ENABLED:-false}
+    tables: ["inventory.inventory.*"]
+    batch_size: 500
+    options:
+      project: ${BQ_PROJECT:-}
+      dataset: ${BQ_DATASET:-cdc}
+      location: ${BQ_LOCATION:-US}

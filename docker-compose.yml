@@ -219,6 +219,8 @@ services:
       mysql-sandbox: {condition: service_healthy}
     healthcheck: *py-health
 
+  # Delivers clean data to every enabled destination in config/destinations.yaml
+  # (SQLite warehouse, JSONL lake landing zone, Iceberg lakehouse, BigQuery...).
   downstream:
     <<: *app
     container_name: cdc-downstream
@@ -226,8 +228,17 @@ services:
     environment:
       <<: *app-env
       METRICS_PORT: "8003"
+      LAKE_DIR: /app/lake
+      DOWNSTREAM_ONLY: ${DOWNSTREAM_ONLY:-}
+      BQ_ENABLED: ${BQ_ENABLED:-false}
+      BQ_PROJECT: ${BQ_PROJECT:-}
+      BQ_DATASET: ${BQ_DATASET:-cdc}
+      BQ_LOCATION: ${BQ_LOCATION:-US}
     ports: ["8003:8003"]
-    volumes: [downstream_state:/app/state]
+    volumes:
+      - downstream_state:/app/state
+      - ./lake:/app/lake          # data lake + Iceberg warehouse, browsable from the host
+      - ./config/destinations.yaml:/app/config/destinations.yaml:ro
     depends_on:
       topic-init: {condition: service_completed_successfully}
     healthcheck: *py-health

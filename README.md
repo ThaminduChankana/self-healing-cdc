@@ -67,7 +67,9 @@ This project shows a different pattern:
                    │                 ▼                                          ▼
                    │          cdc.repaired                                  cdc.audit
                    ▼                 ▼
-              downstream consumer (dedupe by event_id) → warehouse (SQLite stand-in)
+        downstream service — one consumer group per destination (config/destinations.yaml)
+          ├─► warehouse    (SQLite current state)        ├─► lakehouse (Apache Iceberg)
+          ├─► lake_landing (JSONL change log, partitioned) └─► bigquery  (off by default) / your own Sink
 ```
 
 More detail: [docs/architecture.md](docs/architecture.md).
@@ -89,7 +91,8 @@ src/
                sql_policy, repair_planner (decision engine), repair_executor, report, worker
   sandbox/     isolation (AST), runner (child process), executor, validator (output), sql_sandbox
   repaired/    producer (repaired + audit)
-  downstream/  consumer (warehouse stand-in)
+  downstream/  consumer (fans out to every enabled destination)
+  sinks/       base (ChangeRecord, Sink), registry, sqlite, jsonl (lake), iceberg, bigquery
   tools/       connector, inspect_source, hf_loader, drift, topics, ollama_check, state, demo
 scripts/       bootstrap, create_topics, register_connector, inspect_mysql, trigger_schema_drift,
                publish_test_event, reset_environment, run_demo
@@ -158,7 +161,8 @@ The demo runs these steps in order. Each step waits for a concrete record on a r
     decision, and the `cdc.repaired` event.
 11. Show the audit record.
 12. Update a second drifted row. It is repaired from the approved-repair cache without calling the LLM.
-13. Show the downstream warehouse row and the event's full lineage.
+13. Show the repaired row in every enabled destination (warehouse, lake, lakehouse) and the event's full
+    lineage.
 14. Revert the rename (non-destructive) and confirm events validate directly again.
 
 If the model's proposal fails any check, the demo **fails with exit code 1** and prints the reasons. It
@@ -184,8 +188,8 @@ before it runs anything. It prints every statement before executing it. Scenario
 ## Running tests
 
 ```bash
-make test              # 228 unit + security tests — no Docker, Kafka or Ollama needed (mock LLM)
-make integration-test  # 10 live tests against the running stack (3 use the real model)
+make test              # 248 unit + security tests — no Docker, Kafka or Ollama needed (mock LLM)
+make integration-test  # 11 live tests against the running stack (3 use the real model)
 ```
 
 The integration tests cover the eight required scenarios against the live stack:
@@ -201,6 +205,8 @@ The integration tests cover the eight required scenarios against the live stack:
 6. Malformed JSON and non-Debezium JSON are isolated, and valid events keep flowing.
 7. Ollama unavailable: events are deferred and never committed, then recovered.
 8. Restart with lost offsets, and a real container restart, produce no duplicate repairs.
+
+A ninth test checks that a new row reaches every enabled destination (SQLite, JSONL lake, Iceberg).
 
 ## Viewing Redpanda topics
 
@@ -242,6 +248,53 @@ One Connect cluster runs all connectors. They all write to `cdc.mutations`, and 
 worker serve every source. Events are routed on `(source.name, database, table)`, so two sources can
 both have an `inventory.products` table. Scale out by adding consumer replicas, not one deployment per
 source (see [docs/architecture.md](docs/architecture.md#multiple-sources)).
+
+## Destinations: warehouse, data lake, lakehouse, BigQuery
+
+Where clean data lands is configured in `config/destinations.yaml`, just like sources. Each enabled
+destination runs with its own consumer group, offsets, micro-batching and retry, so one destination
+failing or lagging never blocks another or loses data. Every record carries `event_id`, `repair_id`,
+`_op` and a source sequence (`_seq`, derived from the binlog position). That gives every destination
+idempotency and last-writer-wins ordering, so an AI-repaired change that arrives late cannot overwrite
+newer data.
+
+| type | What it writes | Verified here |
+|---|---|---|
+| `sqlite` | current-state table per source table (delete tombstones, `_seq` guard) | live + unit |
+| `jsonl` | data-lake landing zone: `lake/landing/<source>/<db>/<table>/dt=YYYY-MM-DD/*.jsonl` change log | live + unit |
+| `iceberg` | Apache Iceberg tables via pyiceberg, `upsert` (current state) or `changelog` mode; any catalog (local SQL, Glue, REST, BigLake) | live + unit (local catalog) |
+| `bigquery` | `<table>_changelog` (partitioned, streamed with `insertId = event_id`) + a latest-row view | unit only (fake client): needs a GCP project |
+| `package.module:MyClass` | your own `Sink` subclass (Snowflake, Redshift, Postgres, Delta, S3/Parquet…) | — |
+
+```yaml
+# config/destinations.yaml
+destinations:
+  lakehouse:
+    type: iceberg
+    enabled: true
+    tables: ["inventory.inventory.*"]      # globs on <source>.<database>.<table>
+    options: {namespace: cdc, mode: upsert, catalog: {type: glue, warehouse: "s3://my-lake/"}}
+  bigquery:
+    type: bigquery
+    enabled: ${BQ_ENABLED:-false}
+    options: {project: ${BQ_PROJECT}, dataset: cdc, location: US}
+```
+
+```bash
+make destinations                         # what is configured + row counts per destination
+docker exec cdc-downstream python -m src.tools.destinations show inventory.inventory.products '{"id": 101}'
+ls lake/landing lake/iceberg/warehouse    # the data lake, on your Mac
+```
+
+To enable BigQuery:
+1. Rebuild the image with `docker compose build --build-arg EXTRA_REQUIREMENTS=requirements-optional.txt`.
+2. Set `BQ_ENABLED=true` and `BQ_PROJECT=<id>` in `.env`.
+3. Mount credentials (Application Default Credentials).
+4. Run `docker compose up -d downstream`.
+
+Adding a new destination type means implementing two methods, `open(contracts)` and
+`write(records, contracts)`, on a `Sink` subclass and referencing it by import path. No pipeline code
+changes.
 
 ## Metrics
 

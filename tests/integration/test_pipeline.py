@@ -287,3 +287,29 @@ def test_8b_container_restart_keeps_repaired_topic_duplicate_free():
     ids = [m["event_id"] for m in w.drain(5)]
     w.close()
     assert len(ids) == len(set(ids)), "a repaired event was published twice"
+
+
+# ── Destinations ───────────────────────────────────────────────────────────
+def _destinations_show(table_ref: str, key: dict) -> dict:
+    out = subprocess.run(["docker", "exec", "cdc-downstream", "python", "-m", "src.tools.destinations", "show",
+                          table_ref, json.dumps(key)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_9_every_enabled_destination_receives_the_change(clean_schema):
+    product = insert_hf_products(1)[0]
+    ref, key = "inventory.inventory.products", {"id": product["id"]}
+    deadline, got = time.time() + 60, {}
+    while time.time() < deadline:
+        got = _destinations_show(ref, key)
+        wh, lake, lh = got.get("warehouse"), got.get("lake_landing"), got.get("lakehouse")
+        if isinstance(wh, dict) and isinstance(lake, dict) and lake.get("latest") and isinstance(lh, dict) \
+                and lh.get("row"):
+            break
+        time.sleep(2)
+    assert got["warehouse"]["payload"]["name"] == product["name"]
+    assert got["lake_landing"]["latest"]["name"] == product["name"]
+    assert got["lake_landing"]["latest"]["_op"] == "c"
+    assert got["lakehouse"]["row"]["name"] == product["name"]
+    assert got["bigquery"] == "disabled or not routed"

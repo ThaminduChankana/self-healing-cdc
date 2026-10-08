@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     type_compatibility_path: Path = PROJECT_ROOT / "config" / "policies" / "type_compatibility.yaml"
     rename_hints_path: Path = PROJECT_ROOT / "config" / "mappings" / "rename_hints.yaml"
     state_dir: Path = PROJECT_ROOT / "state"
+    lake_dir: Path = PROJECT_ROOT / "lake"
+    destinations_config_path: Path = PROJECT_ROOT / "config" / "destinations.yaml"
+    downstream_only: str = ""  # comma-separated destination names to run (empty = all enabled)
 
     # ── Validators ─────────────────────────────────────────────────────────
     @field_validator("redpanda_brokers")

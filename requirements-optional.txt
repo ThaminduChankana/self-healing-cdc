@@ -1,0 +1,3 @@
+# Destinations whose client libraries are not installed by default.
+# Docker: docker compose build --build-arg EXTRA_REQUIREMENTS=requirements-optional.txt
+google-cloud-bigquery>=3.20,<4   # type: bigquery

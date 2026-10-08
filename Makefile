@@ -1,4 +1,4 @@
-.PHONY: help setup start stop restart status logs topics connector connector-config inspect ollama-check \
+.PHONY: destinations help setup start stop restart status logs topics connector connector-config inspect ollama-check \
         ollama-pull test unit-test security-test integration-test test-all drift drift-rename drift-add \
         drift-widen drift-reset load-data test-event demo peek trace metrics validator repair-worker \
         downstream console reset clean
@@ -100,6 +100,10 @@ trace: ## Follow one event through every topic: make trace EVENT=<event_id>
 	@for t in $(DLQ_TOPIC) $(REPAIRED_TOPIC) $(AUDIT_TOPIC) $(VALIDATED_TOPIC); do \
 	  echo "── $$t"; $(PY) -m src.tools.topics find $$t --event-id $(EVENT) | head -80; done
 	@echo "── container logs"; docker compose logs --no-log-prefix validator ai-worker downstream 2>/dev/null | grep -F '$(EVENT)' | tail -20
+
+destinations: ## List destinations and row counts in each (inside the downstream container)
+	@$(PY) -m src.tools.destinations list
+	@docker exec cdc-downstream python -m src.tools.destinations counts
 
 metrics: ## Print pipeline metrics from all services
 	@for p in 8001 8002 8003; do curl -sf localhost:$$p/metrics | grep -E '^cdc_' ; done
