@@ -1,0 +1,10 @@
+# Runtime dependencies (each has a clear purpose)
+confluent-kafka>=2.5,<3      # Kafka protocol client for Redpanda / MSK
+jsonschema>=4.20,<5          # canonical contract validation (JSON Schema 2020-12)
+pydantic>=2.6,<3             # strict models (incl. the AI response schema)
+pydantic-settings>=2.2,<3    # typed, validated configuration from env
+requests>=2.31,<3            # Ollama, Schema Registry, Kafka Connect, Hugging Face APIs
+PyYAML>=6.0,<7               # policies and source registry
+sqlparse>=0.5,<0.6           # secondary SQL statement classification
+prometheus-client>=0.20,<1   # /metrics endpoints
+mysql-connector-python>=9.0  # source inspection + SQL sandbox

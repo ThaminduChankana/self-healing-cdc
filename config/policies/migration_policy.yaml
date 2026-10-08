@@ -1,0 +1,98 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Migration policy for AI-proposed SQL.
+#
+# AI-generated SQL is untrusted. It is accepted ONLY if every statement parses
+# under the strict allowlist grammar in src/ai_repair/sql_policy.py AND every
+# action below is enabled. Anything the grammar does not recognise is rejected.
+# Accepted SQL is executed ONLY in the isolated sandbox MySQL — never against
+# the source database.
+# ─────────────────────────────────────────────────────────────────────────────
+
+max_statements: 3
+max_sql_length: 2000
+
+allowed_actions:
+  add_column: true            # ALTER TABLE t ADD [COLUMN] c <type> [NULL|DEFAULT ...]
+  modify_column_widen: true   # ALTER TABLE t MODIFY [COLUMN] c <wider type>
+  create_index: false         # CREATE INDEX i ON t (c, ...)   (disabled by default)
+  rename_column: false        # ALTER TABLE t CHANGE/RENAME COLUMN (breaks consumers)
+
+# New columns must be nullable or carry a DEFAULT.
+require_nullable_or_default_for_new_columns: true
+
+# Column types the AI may use.
+allowed_column_types:
+  - TINYINT
+  - SMALLINT
+  - MEDIUMINT
+  - INT
+  - INTEGER
+  - BIGINT
+  - FLOAT
+  - DOUBLE
+  - DECIMAL
+  - NUMERIC
+  - CHAR
+  - VARCHAR
+  - TEXT
+  - MEDIUMTEXT
+  - LONGTEXT
+  - DATE
+  - DATETIME
+  - TIMESTAMP
+  - BOOLEAN
+  - BOOL
+  - JSON
+
+# Keywords that cause immediate rejection wherever they appear (outside string
+# literals). The grammar would reject them anyway; listing them gives a clear
+# reason in the audit trail.
+forbidden_keywords:
+  - DROP
+  - TRUNCATE
+  - DELETE
+  - UPDATE
+  - INSERT
+  - REPLACE
+  - GRANT
+  - REVOKE
+  - USER
+  - RENAME
+  - PROCEDURE
+  - FUNCTION
+  - TRIGGER
+  - EVENT
+  - CALL
+  - EXECUTE
+  - PREPARE
+  - HANDLER
+  - LOAD
+  - OUTFILE
+  - DUMPFILE
+  - INFILE
+  - SHUTDOWN
+  - KILL
+  - SYSTEM
+  - SET
+  - DATABASE
+  - SCHEMA
+  - SLEEP
+  - BENCHMARK
+  - LOCK
+  - UNLOCK
+  - FLUSH
+
+# Decision thresholds (CONFIDENCE_THRESHOLD in .env overrides auto_approve).
+confidence_thresholds:
+  auto_approve_min_confidence: 0.90
+  manual_review_min_confidence: 0.60
+
+# Drift classes that always need a human, regardless of AI confidence.
+manual_review_drift_types:
+  - REMOVED_COLUMN
+  - UNKNOWN
+
+sandbox:
+  python_timeout_seconds: 5
+  max_output_bytes: 1048576
+  deterministic_replays: 2

@@ -1,0 +1,269 @@
+# Self-Healing CDC Pipeline — local stack (16 GB MacBook friendly).
+#
+# Start order is enforced with health checks and one-shot init jobs, so no
+# service assumes another is ready:
+#   mysql (healthy = init incl. least-privilege users done) ─┐
+#                                                             ├─ connector-init (registers Debezium connectors)
+#   redpanda ─ topic-init ─ debezium ─────────────────────────┘
+#   topic-init ─ validator, downstream
+#   topic-init + mysql-sandbox ─ ai-worker  ──> Ollama on the host (host.docker.internal)
+#
+# Optional profiles:  --profile console (Redpanda Console)   --profile ollama (Ollama in Docker)
+
+x-app: &app
+  image: self-healing-cdc-app:local
+  pull_policy: never        # built once by the `validator` service below
+  restart: unless-stopped
+  networks: [cdc-net]
+  environment: &app-env
+    REDPANDA_BROKERS: redpanda:9092
+    SCHEMA_REGISTRY_URL: http://redpanda:8081
+    DEBEZIUM_CONNECT_URL: http://debezium:8083
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    MUTATIONS_TOPIC: ${MUTATIONS_TOPIC:-cdc.mutations}
+    VALIDATED_TOPIC: ${VALIDATED_TOPIC:-cdc.validated}
+    DLQ_TOPIC: ${DLQ_TOPIC:-cdc.dlq}
+    REPAIRED_TOPIC: ${REPAIRED_TOPIC:-cdc.repaired}
+    AUDIT_TOPIC: ${AUDIT_TOPIC:-cdc.audit}
+    STATE_DIR: /app/state
+
+services:
+  # ── Source: official Debezium example database ─────────────────────────
+  # docker.io/debezium/example-mysql is no longer published; Debezium moved
+  # its images to quay.io. Same image, official registry.
+  mysql:
+    image: ${MYSQL_SOURCE_IMAGE:-quay.io/debezium/example-mysql:latest}
+    container_name: cdc-mysql
+    hostname: mysql
+    ports: ["3306:3306"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-debezium}
+      MYSQL_USER: mysqluser
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-mysqlpw}
+      CDC_DATABASE: ${MYSQL_DATABASE:-inventory}
+      CDC_READER_USER: ${MYSQL_READER_USER:-cdc_reader}
+      CDC_READER_PASSWORD: ${MYSQL_READER_PASSWORD:-cdc_reader_pw}
+      CDC_WRITER_USER: ${MYSQL_WRITER_USER:-app_writer}
+      CDC_WRITER_PASSWORD: ${MYSQL_WRITER_PASSWORD:-app_writer_pw}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Added next to (not instead of) the image's own inventory.sql.
+      - ./docker/source-db/zz-cdc-users.sh:/docker-entrypoint-initdb.d/zz-cdc-users.sh:ro
+    healthcheck:
+      # Healthy only once init finished: the read-only user can read the example data.
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -u$$CDC_READER_USER -p$$CDC_READER_PASSWORD -e 'SELECT 1 FROM inventory.products LIMIT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    networks: [cdc-net]
+
+  # ── Redpanda (Kafka API + Schema Registry) ─────────────────────────────
+  redpanda:
+    image: ${REDPANDA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:latest}
+    container_name: cdc-redpanda
+    hostname: redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --smp 1
+      - --memory 768M
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --default-log-level=warn
+    ports: ["19092:19092", "18081:18081", "18082:18082"]
+    volumes: [redpanda_data:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [cdc-net]
+
+  topic-init:
+    image: ${REDPANDA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:latest}
+    container_name: cdc-topic-init
+    entrypoint: ["/bin/bash", "/scripts/create_topics.sh"]
+    environment:
+      RPK_BROKERS: redpanda:9092
+      MUTATIONS_TOPIC: ${MUTATIONS_TOPIC:-cdc.mutations}
+      VALIDATED_TOPIC: ${VALIDATED_TOPIC:-cdc.validated}
+      DLQ_TOPIC: ${DLQ_TOPIC:-cdc.dlq}
+      REPAIRED_TOPIC: ${REPAIRED_TOPIC:-cdc.repaired}
+      AUDIT_TOPIC: ${AUDIT_TOPIC:-cdc.audit}
+    volumes: ["./scripts:/scripts:ro"]
+    depends_on:
+      redpanda: {condition: service_healthy}
+    restart: "no"
+    networks: [cdc-net]
+
+  # ── Debezium (Kafka Connect) — one cluster hosts every source connector ─
+  debezium:
+    image: ${DEBEZIUM_CONNECT_IMAGE:-quay.io/debezium/connect:latest}
+    container_name: cdc-debezium
+    hostname: debezium
+    ports: ["8083:8083"]
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: cdc-connect
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      HEAP_OPTS: -Xms256m -Xmx768m
+      # Connector configs reference ${env:MYSQL_PASSWORD}; the secret stays in this env.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-dbz}
+    depends_on:
+      mysql: {condition: service_healthy}
+      topic-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [cdc-net]
+
+  connector-init:
+    <<: *app
+    container_name: cdc-connector-init
+    command: ["python", "-m", "src.tools.connector", "--register", "--url", "http://debezium:8083"]
+    restart: "no"
+    environment:
+      <<: *app-env
+      DEBEZIUM_MYSQL_HOST: mysql
+      DEBEZIUM_MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-debezium}
+      DEBEZIUM_KAFKA_BOOTSTRAP: redpanda:9092
+    depends_on:
+      debezium: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+
+  # ── Isolated SQL sandbox (AI-proposed migrations run ONLY here) ────────
+  mysql-sandbox:
+    image: mysql:8.0
+    container_name: cdc-mysql-sandbox
+    hostname: mysql-sandbox
+    command: ["--performance-schema=OFF", "--innodb-buffer-pool-size=32M", "--max-connections=20"]
+    ports: ["3307:3306"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SANDBOX_DB_ROOT_PASSWORD:-sandbox_root}
+      MYSQL_USER: ${SANDBOX_DB_USER:-sandbox_user}
+      MYSQL_PASSWORD: ${SANDBOX_DB_PASSWORD:-sandbox_pass}
+    volumes:
+      - sandbox_data:/var/lib/mysql
+      - ./docker/mysql-sandbox/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [cdc-net]
+
+  # ── Pipeline services ──────────────────────────────────────────────────
+  validator:
+    <<: *app
+    build: .
+    pull_policy: build
+    container_name: cdc-validator
+    command: ["python", "-m", "src.validator.consumer"]
+    environment:
+      <<: *app-env
+      METRICS_PORT: "8001"
+      MAX_CONSUMER_RETRIES: ${MAX_CONSUMER_RETRIES:-5}
+      COMPATIBLE_TYPE_CHANGE_ROUTING: ${COMPATIBLE_TYPE_CHANGE_ROUTING:-dlq}
+    ports: ["8001:8001"]
+    depends_on:
+      topic-init: {condition: service_completed_successfully}
+    healthcheck: &py-health
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/metrics' % os.environ['METRICS_PORT'], timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  ai-worker:
+    <<: *app
+    container_name: cdc-ai-worker
+    command: ["python", "-m", "src.ai_repair.worker"]
+    environment:
+      <<: *app-env
+      METRICS_PORT: "8002"
+      LLM_MODE: ${LLM_MODE:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-240}
+      AI_REPAIR_ENABLED: ${AI_REPAIR_ENABLED:-true}
+      AUTO_APPLY_SAFE_MIGRATIONS: ${AUTO_APPLY_SAFE_MIGRATIONS:-false}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.90}
+      MAX_AI_RETRIES: ${MAX_AI_RETRIES:-3}
+      SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-5}
+      # Only sandbox credentials — never the source database's.
+      SANDBOX_DB_HOST: mysql-sandbox
+      SANDBOX_DB_PORT: "3306"
+      SANDBOX_DB_USER: ${SANDBOX_DB_USER:-sandbox_user}
+      SANDBOX_DB_PASSWORD: ${SANDBOX_DB_PASSWORD:-sandbox_pass}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["8002:8002"]
+    volumes: [worker_state:/app/state]
+    depends_on:
+      topic-init: {condition: service_completed_successfully}
+      mysql-sandbox: {condition: service_healthy}
+    healthcheck: *py-health
+
+  downstream:
+    <<: *app
+    container_name: cdc-downstream
+    command: ["python", "-m", "src.downstream.consumer"]
+    environment:
+      <<: *app-env
+      METRICS_PORT: "8003"
+    ports: ["8003:8003"]
+    volumes: [downstream_state:/app/state]
+    depends_on:
+      topic-init: {condition: service_completed_successfully}
+    healthcheck: *py-health
+
+  # ── Optional ───────────────────────────────────────────────────────────
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: cdc-console
+    profiles: [console]
+    ports: ["8080:8080"]
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    depends_on:
+      redpanda: {condition: service_healthy}
+    networks: [cdc-net]
+
+  # Use with: OLLAMA_DOCKER_BASE_URL=http://ollama:11434 docker compose --profile ollama up -d
+  # (CPU-only inside Docker on macOS — native Ollama is much faster on Apple Silicon.)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cdc-ollama
+    profiles: [ollama]
+    ports: ["11435:11434"]
+    volumes: [ollama_models:/root/.ollama]
+    networks: [cdc-net]
+
+volumes:
+  mysql_data:
+  redpanda_data:
+  sandbox_data:
+  worker_state:
+  downstream_state:
+  ollama_models:
+
+networks:
+  cdc-net:
+    driver: bridge

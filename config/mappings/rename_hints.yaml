@@ -1,0 +1,15 @@
+# Abbreviation / synonym hints used by the deterministic rename heuristic.
+# These raise the similarity score of a (canonical, source) column pair; they
+# never decide a rename on their own — type and nullability must also agree.
+synonyms:
+  quantity: [qty, stock_quantity, quantity_on_hand, qty_on_hand, stock]
+  description: [desc, descr, details]
+  amount: [amt]
+  number: [num, "no", nbr]
+  identifier: [id]
+  weight: [wt, weight_kg, product_weight]
+  name: [title, product_name]
+  price: [unit_price, cost]
+
+# Prefixes/suffixes that usually decorate the same concept.
+decorators: [stock, product, item, total, current, new, old, src, source, kg, lbs, value]

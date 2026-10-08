@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Type compatibility matrix (explicit, configurable — NOT hidden in the prompt).
+#
+# Direction: `from` = type in the canonical contract, `to` = type now observed
+# at the source. Verdicts:
+#   compatible               widening; every old value fits the new type
+#   requires_transformation  convertible, but values must be transformed
+#   risky                    conversion can fail or lose meaning
+#   destructive              narrowing / lossy; never auto-approved
+#
+# Base types are compared without length/precision; length changes inside the
+# same base type are governed by `length_changes`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+default_verdict: risky
+
+aliases:
+  INTEGER: INT
+  BOOL: TINYINT
+  BOOLEAN: TINYINT
+  NUMERIC: DECIMAL
+  REAL: DOUBLE
+  CHARACTER: CHAR
+
+rules:
+  # Integer widening
+  - {from: TINYINT,   to: SMALLINT,  verdict: compatible}
+  - {from: TINYINT,   to: MEDIUMINT, verdict: compatible}
+  - {from: TINYINT,   to: INT,       verdict: compatible}
+  - {from: TINYINT,   to: BIGINT,    verdict: compatible}
+  - {from: SMALLINT,  to: MEDIUMINT, verdict: compatible}
+  - {from: SMALLINT,  to: INT,       verdict: compatible}
+  - {from: SMALLINT,  to: BIGINT,    verdict: compatible}
+  - {from: MEDIUMINT, to: INT,       verdict: compatible}
+  - {from: MEDIUMINT, to: BIGINT,    verdict: compatible}
+  - {from: INT,       to: BIGINT,    verdict: compatible}
+  - {from: INT,       to: DECIMAL,   verdict: compatible}
+  - {from: INT,       to: DOUBLE,    verdict: compatible}
+  # Floating point
+  - {from: FLOAT,     to: DOUBLE,    verdict: compatible}
+  - {from: FLOAT,     to: DECIMAL,   verdict: requires_transformation}
+  # Strings
+  - {from: CHAR,      to: VARCHAR,   verdict: compatible}
+  - {from: VARCHAR,   to: TEXT,      verdict: compatible}
+  - {from: VARCHAR,   to: MEDIUMTEXT, verdict: compatible}
+  - {from: VARCHAR,   to: LONGTEXT,  verdict: compatible}
+  - {from: TEXT,      to: MEDIUMTEXT, verdict: compatible}
+  - {from: TEXT,      to: LONGTEXT,  verdict: compatible}
+  # Cross-family
+  - {from: INT,       to: VARCHAR,   verdict: requires_transformation}
+  - {from: BIGINT,    to: VARCHAR,   verdict: requires_transformation}
+  - {from: VARCHAR,   to: INT,       verdict: risky}
+  - {from: VARCHAR,   to: BIGINT,    verdict: risky}
+  - {from: DECIMAL,   to: VARCHAR,   verdict: risky}
+  - {from: DOUBLE,    to: VARCHAR,   verdict: risky}
+  # Narrowing
+  - {from: BIGINT,    to: INT,       verdict: destructive}
+  - {from: BIGINT,    to: SMALLINT,  verdict: destructive}
+  - {from: INT,       to: SMALLINT,  verdict: destructive}
+  - {from: INT,       to: TINYINT,   verdict: destructive}
+  - {from: DOUBLE,    to: FLOAT,     verdict: destructive}
+  - {from: TEXT,      to: VARCHAR,   verdict: destructive}
+  - {from: LONGTEXT,  to: VARCHAR,   verdict: destructive}
+
+length_changes:
+  widening: compatible      # VARCHAR(100) -> VARCHAR(255)
+  narrowing: destructive    # VARCHAR(255) -> VARCHAR(100)
+
+# Removing a contract field entirely.
+removed_field: destructive
+
+# Connect (Debezium) logical types -> JSON value family; used when the source
+# SQL type is not propagated.
+connect_types:
+  int8: integer
+  int16: integer
+  int32: integer
+  int64: integer
+  float: number
+  float32: number
+  double: number
+  float64: number
+  boolean: boolean
+  string: string
+  bytes: string
+
+# Connect type widening when SQL types are unavailable.
+connect_rules:
+  - {from: int8,  to: int16, verdict: compatible}
+  - {from: int8,  to: int32, verdict: compatible}
+  - {from: int8,  to: int64, verdict: compatible}
+  - {from: int16, to: int32, verdict: compatible}
+  - {from: int16, to: int64, verdict: compatible}
+  - {from: int32, to: int64, verdict: compatible}
+  - {from: float, to: double, verdict: compatible}
+  - {from: int64, to: int32, verdict: destructive}
+  - {from: double, to: float, verdict: destructive}
+  - {from: int32, to: string, verdict: requires_transformation}
+  - {from: int64, to: string, verdict: requires_transformation}
+  - {from: string, to: int32, verdict: risky}
+  - {from: string, to: int64, verdict: risky}

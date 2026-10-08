@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cdc:contract:inventory.products:v1",
+  "title": "Inventory Product",
+  "description": "Downstream contract for inventory.products. Generated from the live table in quay.io/debezium/example-mysql and reviewed by hand. x-* keywords are annotations used by the drift detector and the SQL sandbox.",
+  "type": "object",
+  "x-source": {
+    "database": "inventory",
+    "table": "products",
+    "primary_key": ["id"]
+  },
+  "properties": {
+    "id": {
+      "type": "integer",
+      "x-sql-type": "INT",
+      "x-connect-type": "int32",
+      "x-nullable": false
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 255,
+      "x-sql-type": "VARCHAR(255)",
+      "x-connect-type": "string",
+      "x-nullable": false
+    },
+    "description": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "x-sql-type": "VARCHAR(512)",
+      "x-connect-type": "string",
+      "x-nullable": true
+    },
+    "weight": {
+      "type": ["number", "null"],
+      "x-sql-type": "FLOAT",
+      "x-connect-type": "float",
+      "x-nullable": true
+    }
+  },
+  "required": ["id", "name", "description", "weight"],
+  "additionalProperties": false
+}

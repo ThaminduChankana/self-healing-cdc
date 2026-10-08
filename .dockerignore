@@ -1,0 +1,13 @@
+venv/
+.venv/
+state/
+data/
+Ollama.app/
+ollama
+ollama.zip
+*.sql
+.pytest_cache/
+**/__pycache__/
+tests/
+docs/
+.env

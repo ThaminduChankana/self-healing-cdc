@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Source registry — the ONLY place where source-specific details live.
+#
+# To point the pipeline at a different source database you edit this file
+# (and add canonical contracts under config/canonical_schema/); no code changes.
+#
+#   - connector:      how Debezium captures the source (rendered into the
+#                     Kafka Connect config by `python -m src.tools.connector`)
+#   - tables:         which tables are captured, their primary keys and the
+#                     canonical (downstream) contract each one must satisfy
+#   - drift_scenarios: the controlled schema changes used by the demo/tests;
+#                     they are re-verified against information_schema before
+#                     any SQL is executed
+#   - seed_data:      where realistic rows come from (Hugging Face dataset)
+#
+# Credentials are NEVER stored here — only the names of environment variables.
+# ─────────────────────────────────────────────────────────────────────────────
+
+sources:
+  inventory:
+    description: Official Debezium example database (quay.io/debezium/example-mysql)
+    engine: mysql
+    database: inventory
+
+    connector:
+      name: inventory-connector
+      class: io.debezium.connector.mysql.MySqlConnector
+      topic_prefix: cdc
+      server_id: 184054
+      # Host/port as seen from the Kafka Connect container.
+      host_env: DEBEZIUM_MYSQL_HOST
+      port_env: DEBEZIUM_MYSQL_PORT
+      user_env: MYSQL_USER
+      password_env: MYSQL_PASSWORD
+      # Extra Debezium properties (merged verbatim into the connector config).
+      extra:
+        decimal.handling.mode: string
+        time.precision.mode: connect
+        snapshot.mode: initial
+
+    tables:
+      - name: products
+        primary_key: [id]
+        contract: products.json
+      - name: products_on_hand
+        primary_key: [product_id]
+        contract: products_on_hand.json
+
+    drift_scenarios:
+      rename:
+        table: products_on_hand
+        column: quantity
+        new_name: stock_quantity
+      add-column:
+        table: products
+        column: supplier_code
+        definition: VARCHAR(64) NULL
+      widen-type:
+        table: products_on_hand
+        column: quantity
+        from_type: INT
+        to_type: BIGINT
+
+    seed_data:
+      provider: huggingface
+      dataset: philschmid/amazon-product-descriptions-vlm
+      config: default
+      split: train
+      rows: 25
+      parent:
+        table: products
+        columns:
+          name:        {from: "Product Name", max_length: 255}
+          description: {from: ["About Product", "description"], max_length: 512}
+          weight:      {from: "Shipping Weight", transform: weight_to_kg}
+      child:
+        table: products_on_hand
+        key_column: product_id
+        columns:
+          quantity:    {from: "Uniq Id", transform: stable_quantity}

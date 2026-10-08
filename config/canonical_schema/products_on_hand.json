@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cdc:contract:inventory.products_on_hand:v1",
+  "title": "Inventory Product On Hand",
+  "description": "Downstream contract for inventory.products_on_hand. Generated from the live table in quay.io/debezium/example-mysql and reviewed by hand.",
+  "type": "object",
+  "x-source": {
+    "database": "inventory",
+    "table": "products_on_hand",
+    "primary_key": ["product_id"]
+  },
+  "properties": {
+    "product_id": {
+      "type": "integer",
+      "x-sql-type": "INT",
+      "x-connect-type": "int32",
+      "x-nullable": false
+    },
+    "quantity": {
+      "type": "integer",
+      "x-sql-type": "INT",
+      "x-connect-type": "int32",
+      "x-nullable": false
+    }
+  },
+  "required": ["product_id", "quantity"],
+  "additionalProperties": false
+}
